@@ -75,7 +75,7 @@ def create_event():
     try:
         plan = generate(context)
     except AIServiceError as exc:
-        return error(str(exc), 503)
+        return error(str(exc), exc.status_code)
     categories = plan.get("budget", {}).get("categories") if isinstance(plan, dict) else None
     if not isinstance(categories, list) or not categories:
         return error("The planner returned an incomplete budget. Please try again.", 502)
@@ -202,7 +202,7 @@ def ai_action(event_id):
     try:
         result = generate(context, action, prompt or None)
     except AIServiceError as exc:
-        return error(str(exc), 503)
+        return error(str(exc), exc.status_code)
     if action == "ideas":
         if not isinstance(result, dict) or not isinstance(result.get("ideas"), list) or any(not isinstance(item, dict) or any(not isinstance(item.get(field), str) for field in ("title", "description", "cost_level", "reason")) for item in result["ideas"]):
             return error("The planner returned an incomplete response. Please try again.", 502)

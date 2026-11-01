@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.ai import AIServiceError, parse_plan
+from app.ai import AIResponseError, AIServiceError, PLAN_RESPONSE_SCHEMA, generate, parse_plan
 
 
 def valid_event():
@@ -153,6 +153,56 @@ def test_invalid_ai_response_handling():
         parse_plan("not json")
     with pytest.raises(AIServiceError, match="incomplete"):
         parse_plan({"event_summary": "missing sections"})
+
+
+def test_structured_event_summary_object_is_rejected(plan):
+    malformed_response = {**plan, "event_summary": {"summary": "A garden wedding", "tone": "elegant"}}
+    with pytest.raises(AIResponseError, match="incomplete"):
+        parse_plan(malformed_response)
+
+
+def test_unknown_ai_plan_fields_are_rejected(plan):
+    malformed_response = {**plan, "unexpected": "value"}
+    with pytest.raises(AIResponseError, match="incomplete"):
+        parse_plan(malformed_response)
+
+
+def test_event_creation_classifies_schema_mismatch_as_bad_gateway(client, monkeypatch, plan):
+    malformed_response = {**plan, "event_summary": {"summary": "A garden wedding"}}
+    monkeypatch.setattr("app.routes.generate", lambda context: parse_plan(malformed_response))
+    response = client.post("/api/events", json=valid_event())
+    assert response.status_code == 502
+    assert "incomplete plan" in response.json["error"]
+    with client.application.app_context():
+        from app.db import get_db
+        assert get_db().execute("SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+def test_plan_generation_requests_gemini_structured_json(monkeypatch, plan):
+    from google import genai
+    from google.genai.types import GenerateContentConfig
+
+    captured = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            GenerateContentConfig(**kwargs["config"])
+            return type("Response", (), {"text": json.dumps(plan)})()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            assert api_key == "test-only-api-key"
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-api-key")
+    context = {"event_type": "Wedding", "budget": 75000, "guests": 35}
+    assert generate(context) == plan
+    assert captured["config"]["response_mime_type"] == "application/json"
+    assert captured["config"]["response_schema"] == PLAN_RESPONSE_SCHEMA
+    assert "event_summary" in captured["config"]["response_schema"]["required"]
+    assert captured["config"]["response_schema"]["properties"]["event_summary"]["type"] == "STRING"
 
 
 def test_non_finite_ai_budget_is_rejected(plan):
