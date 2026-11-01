@@ -173,11 +173,16 @@ if (dashboard) {
   document.querySelector('#chat-form').addEventListener('submit', async event => {
     event.preventDefault()
     const input = document.querySelector('#chat-message')
+    const button = event.currentTarget.querySelector('button[type="submit"]')
     const message = input.value.trim()
     if (!message) return
     appendMessage('user', message)
     input.value = ''
+    button.disabled = true
+    button.innerHTML = '<span class="spinner"></span>'
     try { await aiRequest('chat', message) } catch (err) { appendMessage('planner', err.message) }
+    button.disabled = false
+    button.textContent = '↑'
   })
   document.querySelector('#guest-form').addEventListener('submit', async event => {
     event.preventDefault()

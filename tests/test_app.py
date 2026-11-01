@@ -13,6 +13,7 @@ def test_application_startup(client):
     response = client.get("/")
     assert response.status_code == 200
     assert b"Celebrio" in response.data
+    assert client.get("/create").status_code == 200
 
 
 def test_event_creation_and_retrieval(client, monkeypatch, plan):
@@ -56,6 +57,15 @@ def test_event_requires_json_object(client):
     assert client.post("/api/events", json=["not", "an", "object"]).status_code == 400
 
 
+def test_event_generation_rate_limit(client, monkeypatch, plan):
+    monkeypatch.setattr("app.routes.generate", lambda context: plan)
+    for _ in range(5):
+        assert client.post("/api/events", json=valid_event()).status_code == 201
+    response = client.post("/api/events", json=valid_event())
+    assert response.status_code == 429
+    assert "wait a minute" in response.json["error"]
+
+
 def test_task_and_vendor_updates(client, monkeypatch, plan):
     monkeypatch.setattr("app.routes.generate", lambda context: plan)
     created = client.post("/api/events", json=valid_event()).json
@@ -66,6 +76,19 @@ def test_task_and_vendor_updates(client, monkeypatch, plan):
     assert client.patch(f"/api/tasks/{task_id}", json={"status": "wrong"}).status_code == 400
     assert client.patch(f"/api/vendors/{vendor_id}", json={"status": "Booked"}).json["status"] == "Booked"
     assert client.patch(f"/api/vendors/{vendor_id}", json={"status": "Paid"}).status_code == 400
+    updated = client.get(f"/api/events/{created['event_id']}").json
+    assert next(task for task in updated["tasks"] if task["id"] == task_id)["status"] == "completed"
+    assert updated["vendors"][0]["status"] == "Booked"
+
+
+@pytest.mark.parametrize("event_type", ["Wedding", "Birthday", "Community Event"])
+def test_supported_event_flows_send_the_selected_type(client, monkeypatch, plan, event_type):
+    contexts = []
+    monkeypatch.setattr("app.routes.generate", lambda context: contexts.append(context.copy()) or plan)
+    data = valid_event()
+    data["event_type"] = event_type
+    assert client.post("/api/events", json=data).status_code == 201
+    assert contexts[0]["event_type"] == event_type
 
 
 def test_guest_categories_persist(client, monkeypatch, plan):
@@ -102,6 +125,24 @@ def test_ai_budget_optimizer_validates_limit(client, monkeypatch, plan):
     assert response.status_code == 502
 
 
+def test_ai_budget_optimizer_updates_persisted_plan(client, monkeypatch, plan):
+    optimized = {"categories": [{"category": "Venue", "amount": 45000, "priority": "High"}, {"category": "Food", "amount": 30000, "priority": "High"}], "summary": "Kept the celebration within budget."}
+    monkeypatch.setattr("app.routes.generate", lambda context, action=None, extra=None: plan if action is None else optimized)
+    event_id = client.post("/api/events", json=valid_event()).json["event_id"]
+    response = client.post(f"/api/events/{event_id}/ai", json={"action": "optimize"})
+    assert response.status_code == 200
+    assert client.get(f"/api/events/{event_id}").json["plan"]["budget"] == optimized
+
+
+def test_dashboard_escapes_ai_text(client, monkeypatch, plan):
+    malicious = {**plan, "event_summary": "<img src=x onerror=alert(1)>"}
+    monkeypatch.setattr("app.routes.generate", lambda context: malicious)
+    event_id = client.post("/api/events", json=valid_event()).json["event_id"]
+    page = client.get(f"/events/{event_id}")
+    assert b"&lt;img src=x onerror=alert(1)&gt;" in page.data
+    assert b"<img src=x onerror=alert(1)>" not in page.data
+
+
 def test_ai_response_parsing(plan):
     assert parse_plan(json.dumps(plan)) == plan
     assert parse_plan("```json\n" + json.dumps(plan) + "\n```") == plan
@@ -114,11 +155,30 @@ def test_invalid_ai_response_handling():
         parse_plan({"event_summary": "missing sections"})
 
 
+def test_non_finite_ai_budget_is_rejected(plan):
+    plan["budget"]["categories"][0]["amount"] = float("nan")
+    with pytest.raises(AIServiceError, match="incomplete"):
+        parse_plan(plan)
+
+
+def test_invalid_ai_vendor_status_is_rejected(plan):
+    plan["vendors"][0]["status"] = "Booked-ish"
+    with pytest.raises(AIServiceError, match="incomplete"):
+        parse_plan(plan)
+
+
 def test_missing_gemini_key_is_controlled(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     from app.ai import generate
     with pytest.raises(AIServiceError, match="GEMINI_API_KEY"):
         generate({})
+
+
+def test_event_creation_shows_missing_gemini_configuration(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    response = client.post("/api/events", json=valid_event())
+    assert response.status_code == 503
+    assert "GEMINI_API_KEY" in response.json["error"]
 
 
 def test_404_behavior(client):

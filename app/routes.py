@@ -1,9 +1,9 @@
 import json
 import math
 import uuid
-from datetime import date, datetime
+from datetime import date, timedelta
 
-from flask import Blueprint, current_app, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, jsonify, render_template, request, url_for
 
 from .ai import AIServiceError, generate
 from .db import get_db
@@ -40,7 +40,7 @@ def home():
 
 @bp.get("/create")
 def create():
-    return render_template("create.html")
+    return render_template("create.html", earliest_date=(date.today() + timedelta(days=1)).isoformat())
 
 
 @bp.post("/api/events")
@@ -60,11 +60,13 @@ def create_event():
         return error("Choose a supported currency.")
     try:
         event_date = date.fromisoformat(data["event_date"])
+        if isinstance(data["guests"], bool) or isinstance(data["guests"], float) and not data["guests"].is_integer() or isinstance(data["budget"], bool):
+            return error("Enter a valid whole guest count and budget.")
         guests = int(data["guests"])
         budget = float(data["budget"])
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return error("Enter a valid date, guest count, and budget.")
-    if event_date < date.today() or guests < 1 or guests > 1000000 or not math.isfinite(budget) or budget <= 0 or budget > 1000000000000:
+    if event_date <= date.today() or guests < 1 or guests > 1000000 or not math.isfinite(budget) or budget <= 0 or budget > 1000000000000:
         return error("Use a future date, at least one guest, and a positive budget.")
     if len(data["name"].strip()) > 120 or len(data["location"].strip()) > 160 or len(data.get("notes", "")) > 2000:
         return error("Some event details are longer than allowed.")
@@ -78,10 +80,12 @@ def create_event():
     if not isinstance(categories, list) or not categories:
         return error("The planner returned an incomplete budget. Please try again.", 502)
     try:
+        if any(not isinstance(item, dict) or not isinstance(item.get("amount"), (int, float)) or isinstance(item["amount"], bool) for item in categories):
+            return error("The planner returned an incomplete budget. Please try again.", 502)
         amounts = [float(item["amount"]) for item in categories]
-        if any(amount < 0 for amount in amounts) or sum(amounts) > budget:
+        if any(not math.isfinite(amount) or amount < 0 for amount in amounts) or sum(amounts) > budget:
             return error("The planner returned a budget allocation outside your total. Please try again.", 502)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return error("The planner returned an incomplete budget. Please try again.", 502)
     event_id = str(uuid.uuid4())
     db = get_db()
@@ -154,16 +158,21 @@ def update_guests(event_id):
     if category not in ("Family", "Friends", "Colleagues", "Community", "Children", "Other"):
         return error("Choose a valid guest category.")
     try:
+        if isinstance(data.get("estimated"), bool) or isinstance(data.get("confirmed"), bool) or isinstance(data.get("estimated"), float) and not data["estimated"].is_integer() or isinstance(data.get("confirmed"), float) and not data["confirmed"].is_integer():
+            return error("Guest counts must be whole numbers.")
         estimated, confirmed = int(data.get("estimated")), int(data.get("confirmed"))
     except (ValueError, TypeError):
         return error("Guest counts must be whole numbers.")
     if estimated < 0 or confirmed < 0 or confirmed > estimated:
         return error("Confirmed guests must be between zero and the estimated count.")
     db = get_db()
-    row = db.execute("SELECT guest_categories FROM events WHERE id=?", (event_id,)).fetchone()
+    row = db.execute("SELECT guests, guest_categories FROM events WHERE id=?", (event_id,)).fetchone()
     if not row:
         return error("Event not found.", 404)
     categories = json.loads(row["guest_categories"])
+    remaining = row["guests"] - sum(group["estimated"] for group in categories if group["category"] != category)
+    if estimated > remaining:
+        return error("Guest group estimates cannot exceed the event guest count.")
     item = {"category": category, "estimated": estimated, "confirmed": confirmed}
     if next((i for i, current in enumerate(categories) if current["category"] == category), None) is not None:
         index = next(i for i, current in enumerate(categories) if current["category"] == category)
@@ -195,18 +204,22 @@ def ai_action(event_id):
     except AIServiceError as exc:
         return error(str(exc), 503)
     if action == "ideas":
-        if not isinstance(result, dict) or not isinstance(result.get("ideas"), list):
+        if not isinstance(result, dict) or not isinstance(result.get("ideas"), list) or any(not isinstance(item, dict) or any(not isinstance(item.get(field), str) for field in ("title", "description", "cost_level", "reason")) for item in result["ideas"]):
             return error("The planner returned an incomplete response. Please try again.", 502)
         return jsonify(result)
     if action == "optimize":
-        if not isinstance(result, dict) or not isinstance(result.get("categories"), list):
+        if not isinstance(result, dict) or not isinstance(result.get("categories"), list) or not isinstance(result.get("summary"), str):
             return error("The planner returned an incomplete response. Please try again.", 502)
         try:
+            if any(not isinstance(item, dict) or not isinstance(item.get("amount"), (int, float)) or isinstance(item["amount"], bool) for item in result["categories"]):
+                return error("The planner returned an incomplete response. Please try again.", 502)
             amounts = [float(item["amount"]) for item in result["categories"]]
             total = sum(amounts)
-            if any(amount < 0 for amount in amounts) or total > event["budget"]:
+            if not result["categories"] or any(not math.isfinite(amount) or amount < 0 for amount in amounts) or total > event["budget"]:
                 return error("The optimized allocation exceeded your budget. Please try again.", 502)
-        except (KeyError, TypeError, ValueError):
+            if any(not isinstance(item.get(field), str) for item in result["categories"] for field in ("category", "priority")):
+                return error("The planner returned an incomplete response. Please try again.", 502)
+        except (KeyError, TypeError, ValueError, OverflowError):
             return error("The planner returned an incomplete response. Please try again.", 502)
         event["plan"]["budget"] = result
         get_db().execute("UPDATE events SET plan=? WHERE id=?", (json.dumps(event["plan"]), event_id))

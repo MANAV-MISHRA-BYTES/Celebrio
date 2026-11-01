@@ -113,16 +113,18 @@ Tests use an isolated temporary SQLite database and mock the Gemini service. The
 
 ## 14. Deployment
 
-The included `Procfile` runs the WSGI app with Gunicorn. Configure `GEMINI_API_KEY`, `SECRET_KEY`, and, if needed, `DATABASE_PATH` in the deployment platform's environment settings. Provide a persistent writable volume for the SQLite database; an ephemeral filesystem will not preserve event data across restarts. For multi-instance traffic, replace SQLite with a managed relational database before scaling horizontally.
+The included `Procfile` starts `gunicorn wsgi:app --bind 0.0.0.0:$PORT`, using the port supplied by the deployment platform. For a local production-style run, use `gunicorn wsgi:app --bind 127.0.0.1:8000`. Configure `GEMINI_API_KEY` and a unique `SECRET_KEY` in the deployment platform's environment settings. Set `DATABASE_PATH` when the platform provides a persistent writable volume; without a persistent filesystem, SQLite data will be lost on restart. The default database location is created under Flask's instance directory and does not use a developer-specific Windows path. The application uses Python's built-in `sqlite3` module and parameterized SQL; it does not use SQLAlchemy. A single Gunicorn worker is the appropriate SQLite deployment shape for this demo.
 
 ## 15. Security
 
 - API keys stay on the server and are excluded from prompt context.
 - The API validates required fields, enumerated choices, date, budget, counts, text lengths, and action payloads.
+- Gemini-backed event creation is limited to five requests per minute per remote address seen by the WSGI app, and planner actions to twelve per minute. This in-memory throttle is a demo safeguard, not distributed abuse protection; a proxy may make several users share one remote address.
 - SQLite queries use placeholders.
 - AI output is parsed and validated before it is shown.
 - `.env`, local databases, caches, and virtual environments are ignored by Git.
 - This initial version has no user authentication or per-user authorization; deploy only in a trusted demo setting until account isolation is implemented.
+- Local runs generate a random per-process signing key; set a stable, unique `SECRET_KEY` before production deployment.
 
 ## 16. Accessibility
 
