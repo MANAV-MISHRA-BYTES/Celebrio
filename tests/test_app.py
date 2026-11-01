@@ -79,7 +79,7 @@ def test_budget_values_calculated(client, monkeypatch, plan):
 
 
 def test_ai_actions_use_event_context(client, monkeypatch, plan):
-    monkeypatch.setattr("app.routes.generate", lambda context, action, extra: {"ideas": plan["ideas"]} if action == "ideas" else "Start with the venue.")
+    monkeypatch.setattr("app.routes.generate", lambda context, action=None, extra=None: plan if action is None else {"ideas": plan["ideas"]} if action == "ideas" else "Start with the venue.")
     event_id = client.post("/api/events", json=valid_event()).json["event_id"]
     ideas = client.post(f"/api/events/{event_id}/ai", json={"action": "ideas"})
     assert ideas.status_code == 200
@@ -88,7 +88,7 @@ def test_ai_actions_use_event_context(client, monkeypatch, plan):
 
 
 def test_ai_budget_optimizer_validates_limit(client, monkeypatch, plan):
-    monkeypatch.setattr("app.routes.generate", lambda context, action, extra: {"categories": [{"category": "Venue", "amount": 80000, "priority": "High"}], "summary": "Reduced"})
+    monkeypatch.setattr("app.routes.generate", lambda context, action=None, extra=None: plan if action is None else {"categories": [{"category": "Venue", "amount": 80000, "priority": "High"}], "summary": "Reduced"})
     event_id = client.post("/api/events", json=valid_event()).json["event_id"]
     response = client.post(f"/api/events/{event_id}/ai", json={"action": "optimize"})
     assert response.status_code == 502

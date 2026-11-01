@@ -22,6 +22,7 @@ def error(message, status=400):
 def event_context(row):
     data = dict(row)
     data["plan"] = json.loads(data["plan"])
+    data["guest_categories"] = json.loads(data["guest_categories"])
     return data
 
 
@@ -184,9 +185,9 @@ def ai_action(event_id):
         if not isinstance(result, dict) or not isinstance(result.get("categories"), list):
             return error("The planner returned an incomplete response. Please try again.", 502)
         try:
-            total = sum(max(0, float(item["amount"])) for item in result["categories"])
-        amounts = [float(item["amount"]) for item in result["categories"]]
-        if any(amount < 0 for amount in amounts) or total > event["budget"]:
+            amounts = [float(item["amount"]) for item in result["categories"]]
+            total = sum(amounts)
+            if any(amount < 0 for amount in amounts) or total > event["budget"]:
                 return error("The optimized allocation exceeded your budget. Please try again.", 502)
         except (KeyError, TypeError, ValueError):
             return error("The planner returned an incomplete response. Please try again.", 502)
