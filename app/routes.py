@@ -1,4 +1,5 @@
 import json
+import math
 import uuid
 from datetime import date, datetime
 
@@ -13,6 +14,7 @@ STYLES = {"Elegant", "Minimal", "Traditional", "Modern", "Luxury", "Casual", "Co
 FOOD = {"Vegetarian", "Non-vegetarian", "Mixed", "Custom"}
 PRIORITIES = {"Budget", "Food", "Decor", "Entertainment", "Guest Experience", "Photography", "Venue"}
 VENDOR_STATUSES = {"Not Started", "Contacted", "Shortlisted", "Booked"}
+CURRENCIES = {"INR", "USD", "EUR", "GBP", "AED"}
 
 
 def error(message, status=400):
@@ -44,18 +46,25 @@ def create():
 @bp.post("/api/events")
 def create_event():
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return error("Event details must be sent as a JSON object.")
     required = ("name", "event_type", "event_date", "location", "guests", "budget", "currency", "style", "food_preference", "priority")
     if any(not str(data.get(field, "")).strip() for field in required):
         return error("Complete every required field before generating your plan.")
+    text_fields = ("name", "event_type", "event_date", "location", "currency", "style", "food_preference", "priority")
+    if any(not isinstance(data[field], str) for field in text_fields) or not isinstance(data.get("notes", ""), str):
+        return error("Event details use an invalid format.")
     if data["event_type"] not in EVENT_TYPES or data["style"] not in STYLES or data["food_preference"] not in FOOD or data["priority"] not in PRIORITIES:
         return error("Choose valid event preferences.")
+    if data["currency"] not in CURRENCIES:
+        return error("Choose a supported currency.")
     try:
         event_date = date.fromisoformat(data["event_date"])
         guests = int(data["guests"])
         budget = float(data["budget"])
     except (ValueError, TypeError):
         return error("Enter a valid date, guest count, and budget.")
-    if event_date < date.today() or guests < 1 or guests > 1000000 or budget <= 0 or budget > 1000000000000:
+    if event_date < date.today() or guests < 1 or guests > 1000000 or not math.isfinite(budget) or budget <= 0 or budget > 1000000000000:
         return error("Use a future date, at least one guest, and a positive budget.")
     if len(data["name"].strip()) > 120 or len(data["location"].strip()) > 160 or len(data.get("notes", "")) > 2000:
         return error("Some event details are longer than allowed.")
@@ -111,6 +120,8 @@ def get_event(event_id):
 @bp.patch("/api/tasks/<int:task_id>")
 def update_task(task_id):
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return error("Task updates must be sent as a JSON object.")
     if data.get("status") not in ("pending", "completed"):
         return error("Task status must be pending or completed.")
     cursor = get_db().execute("UPDATE tasks SET status = ? WHERE id = ?", (data["status"], task_id))
@@ -123,6 +134,8 @@ def update_task(task_id):
 @bp.patch("/api/vendors/<int:vendor_id>")
 def update_vendor(vendor_id):
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return error("Vendor updates must be sent as a JSON object.")
     if data.get("status") not in VENDOR_STATUSES:
         return error("Choose a valid vendor status.")
     cursor = get_db().execute("UPDATE vendors SET status = ? WHERE id = ?", (data["status"], vendor_id))
@@ -135,6 +148,8 @@ def update_vendor(vendor_id):
 @bp.patch("/api/guests/<event_id>")
 def update_guests(event_id):
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return error("Guest updates must be sent as a JSON object.")
     category = str(data.get("category", "")).strip()
     if category not in ("Family", "Friends", "Colleagues", "Community", "Children", "Other"):
         return error("Choose a valid guest category.")
@@ -166,6 +181,8 @@ def ai_action(event_id):
     if not event:
         return error("Event not found.", 404)
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return error("Planner requests must be sent as a JSON object.")
     action = data.get("action")
     if action not in ("chat", "ideas", "optimize"):
         return error("Choose a supported planner action.")

@@ -35,6 +35,10 @@ def test_event_creation_and_retrieval(client, monkeypatch, plan):
     {"guests": "zero"},
     {"budget": "-2"},
     {"style": "Unknown"},
+    {"event_type": []},
+    {"name": 23},
+    {"currency": "BAD"},
+    {"budget": "nan"},
 ])
 def test_event_validation(client, update):
     data = valid_event()
@@ -46,6 +50,10 @@ def test_event_rejects_missing_fields(client):
     response = client.post("/api/events", json={"name": "Incomplete"})
     assert response.status_code == 400
     assert "required" in response.json["error"]
+
+
+def test_event_requires_json_object(client):
+    assert client.post("/api/events", json=["not", "an", "object"]).status_code == 400
 
 
 def test_task_and_vendor_updates(client, monkeypatch, plan):
