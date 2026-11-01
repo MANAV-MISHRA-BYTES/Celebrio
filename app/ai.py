@@ -7,6 +7,7 @@ from datetime import date
 REQUIRED_SECTIONS = ("event_summary", "budget", "timeline", "vendors", "ideas", "guest_plan", "food_plan", "risks", "next_steps")
 TASK_STATUSES = {"pending", "completed"}
 VENDOR_STATUSES = {"Not Started", "Contacted", "Shortlisted", "Booked"}
+GEMINI_HTTP_TIMEOUT_MS = 90_000
 
 
 def _object_schema(properties):
@@ -83,6 +84,10 @@ class AIServiceError(Exception):
 
 class AIResponseError(AIServiceError):
     status_code = 502
+
+
+class AIProviderTimeout(AIServiceError):
+    status_code = 504
 
 
 def parse_plan(raw):
@@ -186,13 +191,28 @@ def generate(context, action="plan", extra=None):
         raise AIServiceError("Gemini is not configured yet. Add GEMINI_API_KEY to the server environment and try again.")
     try:
         from google import genai
-        client = genai.Client(api_key=api_key)
+        from google.genai import types
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=GEMINI_HTTP_TIMEOUT_MS,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
+        )
         config = {"response_mime_type": "application/json", "response_schema": PLAN_RESPONSE_SCHEMA} if action == "plan" else None
         response = client.models.generate_content(model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"), contents=_prompt(context, action, extra), config=config)
         output = response.text
+    except TimeoutError as exc:
+        raise AIProviderTimeout("Gemini timed out while generating the plan. Please try again.") from exc
     except AIServiceError:
         raise
     except Exception as exc:
+        try:
+            import httpx
+        except ImportError:
+            httpx = None
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            raise AIProviderTimeout("Gemini timed out while generating the plan. Please try again.") from exc
         raise AIServiceError("Gemini could not complete that request. Please try again in a moment.") from exc
     if action == "plan":
         return parse_plan(output)

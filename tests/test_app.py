@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.ai import AIResponseError, AIServiceError, PLAN_RESPONSE_SCHEMA, generate, parse_plan
+from app.ai import AIProviderTimeout, AIResponseError, AIServiceError, GEMINI_HTTP_TIMEOUT_MS, PLAN_RESPONSE_SCHEMA, generate, parse_plan
 
 
 def valid_event():
@@ -191,8 +191,9 @@ def test_plan_generation_requests_gemini_structured_json(monkeypatch, plan):
             return type("Response", (), {"text": json.dumps(plan)})()
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key, http_options):
             assert api_key == "test-only-api-key"
+            captured["http_options"] = http_options
             self.models = FakeModels()
 
     monkeypatch.setattr(genai, "Client", FakeClient)
@@ -203,6 +204,32 @@ def test_plan_generation_requests_gemini_structured_json(monkeypatch, plan):
     assert captured["config"]["response_schema"] == PLAN_RESPONSE_SCHEMA
     assert "event_summary" in captured["config"]["response_schema"]["required"]
     assert captured["config"]["response_schema"]["properties"]["event_summary"]["type"] == "STRING"
+    assert captured["http_options"].timeout == GEMINI_HTTP_TIMEOUT_MS
+    assert captured["http_options"].retry_options.attempts == 1
+
+
+def test_gemini_timeout_is_classified_and_bounded(monkeypatch):
+    import httpx
+    from google import genai
+
+    captured = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            raise httpx.ReadTimeout("synthetic timeout")
+
+    class FakeClient:
+        def __init__(self, api_key, http_options):
+            captured["http_options"] = http_options
+            self.models = FakeModels()
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-api-key")
+    with pytest.raises(AIProviderTimeout, match="timed out") as error:
+        generate({"event_type": "Birthday"})
+    assert error.value.status_code == 504
+    assert captured["http_options"].timeout == GEMINI_HTTP_TIMEOUT_MS
+    assert captured["http_options"].retry_options.attempts == 1
 
 
 def test_non_finite_ai_budget_is_rejected(plan):
@@ -245,3 +272,11 @@ def test_ai_failure_does_not_create_event(client, monkeypatch):
     with client.application.app_context():
         from app.db import get_db
         assert get_db().execute("SELECT count(*) FROM events").fetchone()[0] == 0
+
+
+def test_gemini_timeout_returns_gateway_timeout(client, monkeypatch):
+    def timed_out(context):
+        raise AIProviderTimeout("Gemini timed out while generating the plan.")
+    monkeypatch.setattr("app.routes.generate", timed_out)
+    response = client.post("/api/events", json=valid_event())
+    assert response.status_code == 504
